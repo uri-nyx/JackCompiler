@@ -31,6 +31,12 @@ const TokenKeywords = new Enum({
   FALSE: { value: 18, description: 'false' },
   NULL: { value: 19, description: 'null' },
   THIS: { value: 20, description: 'this' },
+  CONST: { value: 21, description: 'const' },
+  BREAK: { value: 22, description: 'break' },
+  CONTINUE: { value: 23, description: 'continue' },
+  FOR: { value: 24, description: 'for' },
+  GOTO: { value: 25, description: 'goto' },
+  ANCHOR: { value: 25, description: 'anchor' },
 });
 
 class JackTokenizer {
@@ -39,11 +45,13 @@ class JackTokenizer {
     this.prevLine = '';
     this.line = '';
     this.lineIndex = 0;
+    this.lineno = 0;
     this.nextToken = {};
     this.token = {};
   }
 
   getLine() {
+    this.lineno++;
     let noComments = '';
     let whiteSpaceComment = /\/\/.*/;
     const blockComment = /\/\*(?:\*(?!\/)|(?<!\*)\/|[^\*\/])*(\*\/)?$/; // match * if no / after it, match / if no * before it
@@ -79,10 +87,10 @@ class JackTokenizer {
       }
       this.lineIndex = 0;
     }
-    const keywordRe = "\\b(class|constructor|function|method|field|static|var|int|char|boolean|void|true|false|null|this|let|do|if|else|while|return)\\b";
+    const keywordRe = "\\b(class|constructor|function|method|field|static|var|const|int|char|boolean|void|true|false|null|this|let|do|if|else|while|return|break|continue|for|goto|anchor)\\b";
     const identifierRe = "\\b([a-z][a-z_0-9]*)\\b";
-    const symbolRe = "([\\-\\[\\]{}().,;+*/&|<>=~])";
-    const intConstRe = "(\\d+)";
+    const symbolRe = "(\\^=|~=|>=|<=|\\+=|-=|\\*=|\\\/=|&=|\\|=|&&|\\|\\||<<|>>>|>>|#@|#!|[\\-\\[\\]{}\\(\\)\\.,\\;\\+\\*\\\/&\\|<>=~\\?:%\\^#@!])";
+    const intConstRe = "((?:'.')|(?:0x[A-Fa-f0-9]+)|(?:\\d+))";
     const stringConstRe = '"(.+)"';
     const tokens = new RegExp([keywordRe, identifierRe, symbolRe, intConstRe, stringConstRe].join('|'), "gi");
     let matches;
@@ -123,7 +131,11 @@ class JackTokenizer {
   }
 
   intVal() {
-    return parseInt(this.token.value, 10);
+    if (this.token.value.charAt(0) === "'") {
+      return this.token.value.charCodeAt(1);
+    } else {
+      return parseInt(this.token.value);
+    }
   }
 
   stringVal() {

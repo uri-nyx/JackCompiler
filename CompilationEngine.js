@@ -1,12 +1,14 @@
 const fs = require('fs');
-const {JackTokenizer, TokenTypes, TokenKeywords} = require('./JackTokenizer');
-const {SymbolTable, SymbolTableKinds} = require('./SymbolTable');
-const {VMWriter, Segments, Commands} = require('./VMWriter');
+const { JackTokenizer, TokenTypes, TokenKeywords } = require('./JackTokenizer');
+const { SymbolTable, SymbolTableKinds } = require('./SymbolTable');
+const { VMWriter, Segments, Commands } = require('./VMWriter');
+const { assert } = require('console');
+const { exit } = require('yargs');
 
 const { KEYWORD, SYMBOL, IDENTIFIER, INT_CONST, STRING_CONST } = TokenTypes;
 const {
   CLASS, METHOD, FUNCTION, CONSTRUCTOR, INT, BOOLEAN, CHAR, VOID, VAR, STATIC, FIELD, LET,
-  DO, IF, ELSE, WHILE, RETURN, TRUE, FALSE, NULL, THIS,
+  DO, IF, ELSE, WHILE, FOR, RETURN, TRUE, FALSE, NULL, THIS, CONST, BREAK, CONTINUE, GOTO, ANCHOR
 } = TokenKeywords;
 const tokenMethod = new Map([
   [KEYWORD, JackTokenizer.prototype.keyword],
@@ -22,17 +24,22 @@ const segment = kind => {
   else if (kind === SymbolTableKinds.FIELD) { return Segments.THIS; }
   else if (kind === SymbolTableKinds.VAR) { return Segments.LOCAL; }
   else if (kind === SymbolTableKinds.ARG) { return Segments.ARG; }
+  else if (kind === SymbolTableKinds.CLASS_CONST) { return Segments.CONST; }
+  else if (kind === SymbolTableKinds.LOCAL_CONST) { return Segments.CONST; }
 }
 
 class CompilationEngine {
-  constructor(inputFile, outputFile, enableLog=false) {
+  constructor(inputFile, outputFile, enableLog = false, enableExtensions = false) {
     this.inputFile = inputFile;
     this.tk = new JackTokenizer(inputFile);
     this.st = new SymbolTable();
     this.vw = new VMWriter(outputFile);
     this.indentLevel = 0;
     this.enableLog = enableLog;
+    this.enableExtensions = enableExtensions;
     this.labelGen = this.labelGenerator();
+    this.continueLabel = null; 
+    this.breakLabel = null;
     this.genLabel = controlFlow => {
       this.labelGen.next();;
       return this.labelGen.next(controlFlow).value;
@@ -59,11 +66,13 @@ class CompilationEngine {
       const controlFlow = yield;
 
       if (!this.className || !this.subroutineName) {
-        throw Error('Cannot generate label from emtpy class/function name');
+        console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+        \tCannot generate label from emtpy class/function name (hint: '${this.tk.line}')`);
+        process.exit(1);
       }
 
-      if (!['while', 'if'].includes(controlFlow)) {
-        throw Error("Arg must be one of 'if', 'while', 'else'");
+      if (!['while', 'if', 'for'].includes(controlFlow)) {
+        throw Error("Arg must be one of 'if', 'while', 'else', 'for'");
       }
 
       const key = this.className + this.subroutineName + controlFlow;
@@ -74,14 +83,17 @@ class CompilationEngine {
       }
 
       if (controlFlow === 'while') {
-        yield [`WHILE_EXP${id[key]}`, `WHILE_END${id[key]}`];
+        yield [`.${this.subroutineName}_WHILE_EXP_${id[key]}`, `.${this.subroutineName}WHILE_END_${id[key]}`];
       } else if (controlFlow === 'if') {
-        yield [`IF_FALSE${id[key]}`, `IF_END${id[key]}`];
-      }
+        yield [`.${this.subroutineName}_IF_FALSE_${id[key]}`, `.${this.subroutineName}IF_END_${id[key]}`];
+      } else if (controlFlow === 'for') {
+        yield [`.${this.subroutineName}_FOR_TEST_${id[key]}`, `.${this.subroutineName}_FOR_INCR_${id[key]}`,
+               `.${this.subroutineName}_FOR_BODY_${id[key]}`, `.${this.subroutineName}_FOR_END_${id[key]}`];
+      } 
     }
   }
 
-  log({type, data}={}) {
+  log({ type, data } = {}) {
     if (!this.enableLog) return;
     let str;
 
@@ -130,11 +142,11 @@ class CompilationEngine {
   }
 
   logWrapper(compileCb, tag, ...cbArgs) {
-    this.log({type: 'raw', data: `<${tag}>`});
+    this.log({ type: 'raw', data: `<${tag}>` });
     this.indentLevel++;
     const retVal = compileCb.apply(this, cbArgs);
     this.indentLevel--;
-    this.log({type: 'raw', data: `</${tag}>`});
+    this.log({ type: 'raw', data: `</${tag}>` });
     return retVal;
   }
 
@@ -143,21 +155,24 @@ class CompilationEngine {
     const thisToken = this.getToken(thisTokenType);
 
     return (Array.isArray(accepted) && accepted.includes(thisToken)) ||
-           (Array.isArray(accepted) && accepted.includes(thisTokenType)) ||
-           (accepted === thisToken) ||
-           (accepted === thisTokenType);
+      (Array.isArray(accepted) && accepted.includes(thisTokenType)) ||
+      (accepted === thisToken) ||
+      (accepted === thisTokenType);
   }
 
   eat(accepted) {
-    let ate = {token: this.getToken(this.tk.tokenType()), tokenType: this.tk.tokenType()};
+    let ate = { token: this.getToken(this.tk.tokenType()), tokenType: this.tk.tokenType() };
 
     if (this.tokenOneOf(accepted)) {
-      this.tk.tokenType() !== IDENTIFIER && this.log({type: 'currentToken'});
+      this.tk.tokenType() !== IDENTIFIER && this.log({ type: 'currentToken' });
       if (this.tk.hasMoreTokens()) {
         this.tk.advance();
       }
     } else {
-      throw new Error(`Failed to see "${accepted.display || accepted}" token`);
+      var sym = accepted.description;
+      console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+      \tExpected '${accepted.display ||sym}', got '${ate.token.display}' (hint: '${this.tk.line}')`);
+      process.exit(1);
     }
 
     return ate;
@@ -165,17 +180,20 @@ class CompilationEngine {
 
   compileClass() {
     this.eat(CLASS);
-    const {token: identifier} = this.eat(IDENTIFIER);
-    this.log({type: 'identifierToken', data: {
-      category: 'className',
-      defined: true,
-      kind: SymbolTableKinds.NONE,
-      identifier}});
+    const { token: identifier } = this.eat(IDENTIFIER);
+    this.log({
+      type: 'identifierToken', data: {
+        category: 'className',
+        defined: true,
+        kind: SymbolTableKinds.NONE,
+        identifier
+      }
+    });
     this.className = identifier;
 
     this.eat('{');
 
-    while (this.tokenOneOf([STATIC, FIELD])) {
+    while (this.tokenOneOf([STATIC, FIELD, CONST])) {
       this.logWrapper(this.compileClassVarDec, 'classVarDec');
     }
 
@@ -187,65 +205,151 @@ class CompilationEngine {
   }
 
   compileClassVarDec() {
-    const {token: type} = this.eat([STATIC, FIELD]);
+    if (this.enableExtensions) {
+      while (this.tokenOneOf([CONST])) {
+        this.logWrapper(this.compileConstDec, 'constDec', SymbolTableKinds.CLASS_CONST);
+      }
+    }
+
+    if (!this.tokenOneOf([STATIC, FIELD])) {return;}
+
+    const { token: type } = this.eat([STATIC, FIELD]);
 
     let kind;
     if (type === STATIC) { kind = SymbolTableKinds.STATIC; }
     else if (type === FIELD) { kind = SymbolTableKinds.FIELD; }
 
-    const {token: typeIdentifier, tokenType} = this.eat(TYPE_RULE);
-    tokenType === IDENTIFIER && this.log({type: 'identifierToken', data: {
-      category: 'className',
-      defined: false,
-      kind: SymbolTableKinds.NONE,
-      identifier: typeIdentifier}})
+    const { token: typeIdentifier, tokenType } = this.eat(TYPE_RULE);
+    tokenType === IDENTIFIER && this.log({
+      type: 'identifierToken', data: {
+        category: 'className',
+        defined: false,
+        kind: SymbolTableKinds.NONE,
+        identifier: typeIdentifier
+      }
+    })
 
-    const {token: identifier} = this.eat(IDENTIFIER);
+    const { token: identifier } = this.eat(IDENTIFIER);
     this.st.define(identifier, typeIdentifier.display || typeIdentifier, kind);
-    this.log({type: 'identifierToken', data: {
-      category: "varName",
-      kind,
-      defined: true,
-      index: this.st.indexOf(identifier),
-      identifier}});
-
-    while (this.tokenOneOf(',')) {
-      this.eat(',');
-
-      const {token: identifier} = this.eat(IDENTIFIER);
-      this.st.define(identifier, typeIdentifier.display || typeIdentifier, kind);
-      this.log({type: 'identifierToken', data: {
+    this.log({
+      type: 'identifierToken', data: {
         category: "varName",
         kind,
         defined: true,
         index: this.st.indexOf(identifier),
-        identifier}});
+        identifier
+      }
+    });
+
+    while (this.tokenOneOf(',')) {
+      this.eat(',');
+
+      const { token: identifier } = this.eat(IDENTIFIER);
+      this.st.define(identifier, typeIdentifier.display || typeIdentifier, kind);
+      this.log({
+        type: 'identifierToken', data: {
+          category: "varName",
+          kind,
+          defined: true,
+          index: this.st.indexOf(identifier),
+          identifier
+        }
+      });
+    }
+    this.eat(';');
+  }
+
+  compileConstDec(kind) {
+    this.eat(CONST);
+
+    const { token: identifier } = this.eat(IDENTIFIER);
+    this.log({
+      type: 'identifierToken', data: {
+        category: "constName",
+        kind,
+        defined: true,
+        index: null,
+        identifier
+      }
+    });
+    this.eat('=');
+    if (this.tokenOneOf(['-', '+', '~'])) {
+      const { token }  = this.eat(['-', '+', '~'])
+      const { token: n, tokenType } = this.eat(INT_CONST);
+
+      let constant;
+      if (token === '-') constant = -n;
+      if (token === '~') constant = ~n;
+      if (token === '+') constant = +n;
+
+      this.st.define(identifier, tokenType, kind, constant);
+    } else {
+      const { token: n, tokenType } = this.eat(INT_CONST);
+      this.st.define(identifier, tokenType, kind, n);
     }
 
+    while (this.tokenOneOf(',')) {
+      this.eat(',');
+
+      const { token: identifier } = this.eat(IDENTIFIER);
+      this.log({
+        type: 'identifierToken', data: {
+          category: "constName",
+          kind,
+          defined: true,
+          index: null,
+          identifier
+        }
+      });
+
+      this.eat('=');
+
+      if (this.tokenOneOf(['-', '+', '~'])) {
+        const { token }  = this.eat(['-', '+', '~'])
+        const { token: n, tokenType } = this.eat(INT_CONST);
+        console.log(n);
+  
+        let constant;
+        if (token === '-') constant = -n;
+        if (token === '~') constant = ~n;
+        if (token === '+') constant = +n;
+  
+        this.st.define(identifier, tokenType, kind, constant);
+      } else {
+        const { token: n, tokenType } = this.eat(INT_CONST);
+        this.st.define(identifier, tokenType, kind, n);
+      }
+    }
     this.eat(';');
   }
 
   compileSubroutineDec() {
     this.st.startSubroutine();
-    const {token: subroutineType} = this.eat([CONSTRUCTOR, FUNCTION, METHOD]);
+    const { token: subroutineType } = this.eat([CONSTRUCTOR, FUNCTION, METHOD]);
 
     if (subroutineType === METHOD) {
       this.st.define('this', this.className, SymbolTableKinds.ARG);
     }
 
-    const {token: typeIdentifier, tokenType} = this.eat([VOID, ...TYPE_RULE]);
-    tokenType === IDENTIFIER && this.log({type: 'identifierToken', data: {
-      category: 'className',
-      defined: false,
-      kind: SymbolTableKinds.NONE,
-      identifier: typeIdentifier}});
+    const { token: typeIdentifier, tokenType } = this.eat([VOID, ...TYPE_RULE]);
+    tokenType === IDENTIFIER && this.log({
+      type: 'identifierToken', data: {
+        category: 'className',
+        defined: false,
+        kind: SymbolTableKinds.NONE,
+        identifier: typeIdentifier
+      }
+    });
 
-    const {token: identifier} = this.eat(IDENTIFIER);
-    this.log({type: 'identifierToken', data: {
-      category: 'subroutineName',
-      defined: true,
-      kind: SymbolTableKinds.NONE,
-      identifier}});
+    const { token: identifier } = this.eat(IDENTIFIER);
+    this.log({
+      type: 'identifierToken', data: {
+        category: 'subroutineName',
+        defined: true,
+        kind: SymbolTableKinds.NONE,
+        identifier
+      }
+    });
     this.subroutineName = identifier;
 
     this.eat('(');
@@ -256,54 +360,69 @@ class CompilationEngine {
 
   compileParameterList() {
     if (this.tokenOneOf(TYPE_RULE)) {
-      const {token: typeIdentifier, tokenType} = this.eat(TYPE_RULE);
-      tokenType === IDENTIFIER && this.log({type: 'identifierToken', data: {
-        category: 'className',
-        defined: false,
-        kind: SymbolTableKinds.NONE,
-        identifier: typeIdentifier}});
-
-      const {token: identifier} = this.eat(IDENTIFIER);
-      this.st.define(identifier, typeIdentifier.display || typeIdentifier, SymbolTableKinds.ARG);
-      this.log({type: 'identifierToken', data: {
-        category: 'varName',
-        defined: true,
-        kind: SymbolTableKinds.ARG,
-        index: this.st.indexOf(identifier),
-        identifier}});
-
-      while (this.tokenOneOf(',')) {
-        this.eat(',');
-
-        const {token: typeIdentifier, tokenType} = this.eat(TYPE_RULE);
-        tokenType === IDENTIFIER && this.log({ type: 'identifierToken', data: {
+      const { token: typeIdentifier, tokenType } = this.eat(TYPE_RULE);
+      tokenType === IDENTIFIER && this.log({
+        type: 'identifierToken', data: {
           category: 'className',
           defined: false,
           kind: SymbolTableKinds.NONE,
-          identifier: typeIdentifier}});
+          identifier: typeIdentifier
+        }
+      });
 
-        const {token: identifier} = this.eat(IDENTIFIER);
-        this.st.define(identifier, typeIdentifier.display || typeIdentifier, SymbolTableKinds.ARG);
-        this.log({type: 'identifierToken', data: {
+      const { token: identifier } = this.eat(IDENTIFIER);
+      this.st.define(identifier, typeIdentifier.display || typeIdentifier, SymbolTableKinds.ARG);
+      this.log({
+        type: 'identifierToken', data: {
           category: 'varName',
           defined: true,
           kind: SymbolTableKinds.ARG,
           index: this.st.indexOf(identifier),
-          identifier}});
+          identifier
+        }
+      });
+
+      while (this.tokenOneOf(',')) {
+        this.eat(',');
+
+        const { token: typeIdentifier, tokenType } = this.eat(TYPE_RULE);
+        tokenType === IDENTIFIER && this.log({
+          type: 'identifierToken', data: {
+            category: 'className',
+            defined: false,
+            kind: SymbolTableKinds.NONE,
+            identifier: typeIdentifier
+          }
+        });
+
+        const { token: identifier } = this.eat(IDENTIFIER);
+        this.st.define(identifier, typeIdentifier.display || typeIdentifier, SymbolTableKinds.ARG);
+        this.log({
+          type: 'identifierToken', data: {
+            category: 'varName',
+            defined: true,
+            kind: SymbolTableKinds.ARG,
+            index: this.st.indexOf(identifier),
+            identifier
+          }
+        });
       }
     }
   }
 
   compileSubroutineBody(subroutineType) {
     this.eat('{');
-
-    while (this.tokenOneOf(VAR)) {
+    const old_vw = this.vw;
+    this.vw = new VMWriter('temp');
+    if (this.enableExtensions) {
+      while (this.tokenOneOf([CONST])) {
+        this.logWrapper(this.compileConstDec, 'constDec', SymbolTableKinds.LOCAL_CONST);
+      }
+    }
+    while (this.tokenOneOf([VAR])) {
       this.logWrapper(this.compileVarDec, 'varDec');
     }
 
-    this.vw.writeFunction(
-      `${this.className}.${this.subroutineName}`,
-      this.st.varCount(SymbolTableKinds.VAR));
 
     if (subroutineType === CONSTRUCTOR) {
       this.vw.writePush(Segments.CONST, this.st.varCount(SymbolTableKinds.FIELD));
@@ -316,61 +435,327 @@ class CompilationEngine {
 
     this.logWrapper(this.compileStatements, 'statements');
     this.eat('}');
+    
+    const s = fs.readFileSync('temp.vm', 'utf-8');
+    this.vw = old_vw;
+
+    this.vw.writeFunction(
+      `${this.className}.${this.subroutineName}`,
+      this.st.varCount(SymbolTableKinds.VAR)
+    );
+    this.vw.write(s);
   }
 
   compileVarDec() {
     this.eat(VAR);
 
-    var {token: typeIdentifier, tokenType} = this.eat(TYPE_RULE);
-    tokenType === IDENTIFIER && this.log({ type: 'identifierToken', data: {
-      category: 'className',
-      defined: false,
-      kind: SymbolTableKinds.NONE,
-      identifier: typeIdentifier}});
+    var { token: typeIdentifier, tokenType } = this.eat(TYPE_RULE);
+    tokenType === IDENTIFIER && this.log({
+      type: 'identifierToken', data: {
+        category: 'className',
+        defined: false,
+        kind: SymbolTableKinds.NONE,
+        identifier: typeIdentifier
+      }
+    });
 
-    var {token: identifier} = this.eat(IDENTIFIER);
+    var { token: identifier } = this.eat(IDENTIFIER);
     this.st.define(identifier, typeIdentifier.display || typeIdentifier, SymbolTableKinds.VAR);
-    this.log({type: 'identifierToken', data: {
-      category: 'varName',
-      defined: true,
-      kind: SymbolTableKinds.VAR,
-      index: this.st.indexOf(identifier),
-      identifier}});
-
-    while (this.tokenOneOf(',')) {
-      this.eat(',');
-
-      const {token: identifier} = this.eat(IDENTIFIER);
-      this.st.define(identifier, typeIdentifier.display || typeIdentifier, SymbolTableKinds.VAR);
-      this.log({type: 'identifierToken', data: {
+    this.log({
+      type: 'identifierToken', data: {
         category: 'varName',
         defined: true,
         kind: SymbolTableKinds.VAR,
         index: this.st.indexOf(identifier),
-        identifier}});
+        identifier
+      }
+    });
+
+    while (this.tokenOneOf(',')) {
+      this.eat(',');
+
+      const { token: identifier } = this.eat(IDENTIFIER);
+      this.st.define(identifier, typeIdentifier.display || typeIdentifier, SymbolTableKinds.VAR);
+      this.log({
+        type: 'identifierToken', data: {
+          category: 'varName',
+          defined: true,
+          kind: SymbolTableKinds.VAR,
+          index: this.st.indexOf(identifier),
+          identifier
+        }
+      });
     }
 
     this.eat(';');
   }
 
   compileStatements() {
-    while (this.tokenOneOf([LET, IF, WHILE, DO, RETURN])) {
+    while (this.tokenOneOf(['!', '#!', IDENTIFIER, LET, IF, WHILE, DO, RETURN, CONTINUE, BREAK, FOR, GOTO, ANCHOR])) {
+      this.logWrapper(this.compileStatement, 'statement');
+    }
+  }
+
+  compileStatement() {
+    if (this.enableExtensions && (this.tk.tokenType() === IDENTIFIER || this.tokenOneOf(['!', '#!']))) {
+      this.logWrapper(this.compileAssignmentStatement, 'assignment statement');
+    } else {
       const capitalized = this.tk.keyword().display[0].toUpperCase() + this.tk.keyword().display.slice(1);
       this.logWrapper(this[`compile${capitalized}Statement`], `${this.tk.keyword().display}Statement`);
     }
   }
 
+  compileAnchorStatement() {
+    assert(this.enableExtensions);
+    this.eat(ANCHOR);
+    const { token: identifier } = this.eat(IDENTIFIER);
+    this.vw.writeLabel(`.${identifier}`);
+    this.eat(':');
+  }
+
+  compileGotoStatement() {
+    assert(this.enableExtensions);
+    this.eat(GOTO);
+    const { token: identifier } = this.eat(IDENTIFIER);
+    this.vw.writeGoto(`.${identifier}`);
+    this.eat(';');
+  }
+
+  compileContinueStatement() {
+    assert(this.enableExtensions);
+    if (this.continueLabel === null) {
+      console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+      \t'continue' statement may only be used inside loops (hint: '${this.tk.line}')`);
+      process.exit(1);
+    }
+    this.eat(CONTINUE);
+    this.eat(';');
+    this.vw.writeGoto(this.continueLabel);
+
+  }
+
+  compileBreakStatement() {
+    assert(this.enableExtensions);
+    if (this.breakLabel === null) {
+      console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+      \t'break' statement may only be used inside loops (hint: '${this.tk.line}')`);
+      process.exit(1);
+    }
+    this.eat(BREAK);
+    this.eat(';');
+    this.vw.writeGoto(this.breakLabel);
+  }
+
   compileLetStatement() {
     this.eat(LET);
-    const {token: identifier} = this.eat(IDENTIFIER);
-    this.log({type: 'identifierToken', data: {
-      category: 'varName',
-      kind: this.st.kindOf(identifier),
-      index: this.st.indexOf(identifier),
-      defined: false,
-      identifier}});
+    this.logWrapper(this.compileAssignment, 'asignment');
+    if (this.enableExtensions) {
+      while (this.tokenOneOf(',')) {
+        this.eat(',');
+        this.logWrapper(this.compileAssignment, 'asignment');
+      }
+    }
+    this.eat(';');
+  }
+
+  compileAssignments() {
+    this.logWrapper(this.compileAssignment, 'asignment');
+    if (this.enableExtensions) {
+      while (this.tokenOneOf(',')) {
+        this.eat(',');
+        this.logWrapper(this.compileAssignment, 'asignment');
+      }
+    }
+  }
+
+  compileAssignmentStatement() {
+    this.logWrapper(this.compileAssignment, 'asignment');
+    this.eat(';')
+  }
+
+  compileReference() {
+      if (this.tokenOneOf('(')) {
+        this.eat('(');
+        this.logWrapper(this.compileExpression, 'expression');
+        this.eat(')');
+      } else {
+        const { token: identifier } = this.eat(IDENTIFIER);
+        if ([Segments.CONST, Segments.POINTER, Segments.TEMP].includes(segment(this.st.kindOf(identifier)))) {
+          console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+          \tCannot take a reference of a value in segment ${segment(this.st.kindOf(identifier))} (hint: '${this.tk.line}')`);
+          exit(1);
+        }
+        if (this.st.typeOf(identifier) !== 'int') {
+          console.log(`[WARNING]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+          \tTypecasting ${identifier} (type '${this.st.typeOf(identifier)}') to type 'int' (hint: '${this.tk.line}')`)
+        }
+        this.vw.writePushRef('int', segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
+      }
+  }
+
+  compileReferenceChar() {
+    if (this.tokenOneOf('(')) {
+      this.eat('(');
+      this.logWrapper(this.compileExpression, 'expression');
+      this.eat(')');
+    } else {
+      const { token: identifier } = this.eat(IDENTIFIER);
+      if ([Segments.CONST, Segments.POINTER, Segments.TEMP].includes(segment(this.st.kindOf(identifier)))) {
+        console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+        \tCannot take a reference of a value in segment ${segment(this.st.kindOf(identifier))} (hint: '${this.tk.line}')`);
+        exit(1);
+      }
+      if (this.st.typeOf(identifier) !== 'char') {
+        console.log(`[WARNING]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+        \tTypecasting ${identifier} (type '${this.st.typeOf(identifier)}') to type 'char' (hint: '${this.tk.line}')`)
+      }
+      this.vw.writePushRef('char', segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
+    }
+  }
+
+  compileDereference() {
+    if (this.tokenOneOf('(')) {
+      this.eat('(');
+      this.logWrapper(this.compileExpression, 'expression');
+      this.eat(')');
+    } else {
+      const { token: identifier } = this.eat(IDENTIFIER);
+      this.vw.writePush(segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
+    }
+  }
+
+  compileDereferenceChar() {
+    if (this.tokenOneOf('(')) {
+      this.eat('(');
+      this.logWrapper(this.compileExpression, 'expression');
+      this.eat(')');
+    } else {
+      const { token: identifier } = this.eat(IDENTIFIER);
+      this.vw.writePush(segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
+    }
+  }
+
+  compileAssignment() {
+    if (this.tokenOneOf(['!'])) { // address of
+      this.eat('!');
+      this.compileDereference()
+      if (!this.tokenOneOf(['=', '^=', '+=', '-=', '*=', '/=', '&=', '|='])) {
+        console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+        \tAllowed assignment operators are: '=', '^=', '~=', '+=', '-=', '*=', '/=', '&=', '|=' (hint: '${this.tk.line}')`);
+        process.exit(1);
+      }
+
+      const { token, tokenType } = this.eat(this.tk.symbol());
+      if (token !== '=') {
+        this.vw.writePop(Segments.TEMP, 0);
+        this.vw.writePush(Segments.TEMP, 0);
+        this.vw.writePush(Segments.TEMP, 0);
+
+
+        this.vw.writePop(Segments.POINTER, 1);
+        this.vw.writePush(Segments.THAT, 0);
+        this.logWrapper(this.compileExpression, 'expression');
+        this.compileAssignmentOperator(token);
+      } else {
+        this.logWrapper(this.compileExpression, 'expression');
+      }
+      this.vw.writePop(Segments.TEMP, 0);
+      this.vw.writePop(Segments.POINTER, 1);
+      this.vw.writePush(Segments.TEMP, 0);
+      this.vw.writePop(Segments.THAT, 0);
+      return;
+    } else if (this.tokenOneOf(['#!'])) { // assign to address
+      this.eat('#!');
+      this.compileDereferenceChar()
+      if (!this.tokenOneOf(['=', '^=', '+=', '-=', '*=', '/=', '&=', '|='])) {
+        console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+        \tAllowed assignment operators are: '=', '^=', '~=', '+=', '-=', '*=', '/=', '&=', '|=' (hint: '${this.tk.line}')`);
+        process.exit(1);
+      }
+
+      const { token, tokenType } = this.eat(this.tk.symbol());
+      if (token !== '=') {
+        this.vw.writePop(Segments.TEMP, 0);
+        this.vw.writePush(Segments.TEMP, 0);
+        this.vw.writePush(Segments.TEMP, 0);
+
+
+        this.vw.writePop(Segments.POINTER, 2);
+        this.vw.writePush(Segments.THATB, 0);
+        this.logWrapper(this.compileExpression, 'expression');
+        this.compileAssignmentOperator(token);
+      } else {
+        this.logWrapper(this.compileExpression, 'expression');
+      }
+      this.vw.writePop(Segments.TEMP, 0);
+      this.vw.writePop(Segments.POINTER, 2);
+      this.vw.writePush(Segments.TEMP, 0);
+      this.vw.writePop(Segments.THATB, 0);
+      return;
+    }
+    const { token: identifier } = this.eat(IDENTIFIER);
+    this.log({
+      type: 'identifierToken', data: {
+        category: 'varName',
+        kind: this.st.kindOf(identifier),
+        index: this.st.indexOf(identifier),
+        defined: false,
+        identifier
+      }
+    });
+
+    if (!this.st.exists(identifier)) {
+      console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+      \tUndefined symbol '${identifier}' (hint: '${this.tk.line}')`);
+      process.exit(1);
+    }
+
+    if ([SymbolTableKinds.LOCAL_CONST, SymbolTableKinds.CLASS_CONST].includes(this.st.kindOf(identifier))) {
+      console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+      \tCannot assign to constant (hint: '${this.tk.line}')`);
+      process.exit(1);
+    }
 
     if (this.tokenOneOf('[')) {
+      this.eat('[');
+
+      // push base address + index on stack
+      this.vw.writePush(segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
+      this.logWrapper(this.compileExpression, 'expression');
+      if (this.enableExtensions) {
+        this.vw.writePush(Segments.CONST, 2);
+        this.vw.writeCall('Math.shll', 2);
+      }
+      this.vw.writeArithmetic(Commands.ADD);
+
+      this.eat(']');
+
+      if (!this.tokenOneOf(['=', '^=', '+=', '-=', '*=', '/=', '&=', '|='])) {
+        console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+        \tAllowed assignment operators are: '=', '^=', '~=', '+=', '-=', '*=', '/=', '&=', '|=' (hint: '${this.tk.line}')`);
+        process.exit(1);
+      }
+
+      const { token, tokenType } = this.eat(this.tk.symbol());
+      if (token !== '=') {
+        this.vw.writePop(Segments.TEMP, 0);
+        this.vw.writePush(Segments.TEMP, 0);
+        this.vw.writePush(Segments.TEMP, 0);
+
+
+        this.vw.writePop(Segments.POINTER, 1);
+        this.vw.writePush(Segments.THAT, 0);
+        this.logWrapper(this.compileExpression, 'expression');
+        this.compileAssignmentOperator(token);
+      } else {
+        this.logWrapper(this.compileExpression, 'expression');
+      }
+      this.vw.writePop(Segments.TEMP, 0);
+      this.vw.writePop(Segments.POINTER, 1);
+      this.vw.writePush(Segments.TEMP, 0);
+      this.vw.writePop(Segments.THAT, 0);
+    } else if (this.tokenOneOf('#')) {
+      this.eat('#');
       this.eat('[');
 
       // push base address + index on stack
@@ -379,21 +764,99 @@ class CompilationEngine {
       this.vw.writeArithmetic(Commands.ADD);
 
       this.eat(']');
-      this.eat('=');
 
+      if (!this.tokenOneOf(['=', '^=', '+=', '-=', '*=', '/=', '&=', '|='])) {
+        console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+        \tAllowed assignment operators are: '=', '^=', '~=', '+=', '-=', '*=', '/=', '&=', '|=' (hint: '${this.tk.line}')`);
+        process.exit(1);
+      }
+
+      const { token, tokenType } = this.eat(this.tk.symbol());
+      if (token !== '=') {
+        this.vw.writePop(Segments.TEMP, 0);
+        this.vw.writePush(Segments.TEMP, 0);
+        this.vw.writePush(Segments.TEMP, 0);
+
+
+        this.vw.writePop(Segments.POINTER, 2);
+        this.vw.writePush(Segments.THATB, 0);
+        this.logWrapper(this.compileExpression, 'expression');
+        this.compileAssignmentOperator(token);
+      } else {
+        this.logWrapper(this.compileExpression, 'expression');
+      }
+      this.vw.writePop(Segments.TEMP, 0);
+      this.vw.writePop(Segments.POINTER, 2);
+      this.vw.writePush(Segments.TEMP, 0);
+      this.vw.writePop(Segments.THATB, 0);
+    } else if (this.tokenOneOf('[')) {
+      this.eat('[');
+
+      // push base address + index on stack
+      this.vw.writePush(segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
       this.logWrapper(this.compileExpression, 'expression');
+      this.vw.writeArithmetic(Commands.ADD);
+      if (this.enableExtensions) {
+        this.vw.writePush(Segments.CONST, 2);
+        this.vw.writeCall('Math.shll', 2);
+      }
+
+      this.eat(']');
+
+      if (!this.tokenOneOf(['=', '^=', '+=', '-=', '*=', '/=', '&=', '|='])) {
+        console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+        \tAllowed assignment operators are: '=', '^=', '~=', '+=', '-=', '*=', '/=', '&=', '|=' (hint: '${this.tk.line}')`);
+        process.exit(1);
+      }
+
+      const { token, tokenType } = this.eat(this.tk.symbol());
+      if (token !== '=') {
+        this.vw.writePop(Segments.TEMP, 0);
+        this.vw.writePush(Segments.TEMP, 0);
+        this.vw.writePush(Segments.TEMP, 0);
+
+
+        this.vw.writePop(Segments.POINTER, 1);
+        this.vw.writePush(Segments.THAT, 0);
+        this.logWrapper(this.compileExpression, 'expression');
+        this.compileAssignmentOperator(token);
+      } else {
+        this.logWrapper(this.compileExpression, 'expression');
+      }
       this.vw.writePop(Segments.TEMP, 0);
       this.vw.writePop(Segments.POINTER, 1);
       this.vw.writePush(Segments.TEMP, 0);
       this.vw.writePop(Segments.THAT, 0);
+
     } else {
-      this.eat('=');
+      if (!this.tokenOneOf(['=', '^=', '+=', '-=', '*=', '/=', '&=', '|='])) {
+        console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+        \tAllowed assignment operators are: '=', '^=', '~=', '+=', '-=', '*=', '/=', '&=', '|=' (hint: '${this.tk.line}')`);
+        process.exit(1);
+      }
+      const { token, tokenType } = this.eat(this.tk.symbol());
+      if (token !== '=') {
+        this.vw.writePush(segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
+        this.logWrapper(this.compileExpression, 'expression');
 
-      this.logWrapper(this.compileExpression, 'expression');
-      this.vw.writePop(segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
+        this.compileAssignmentOperator(token);
+
+        this.vw.writePop(segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
+      } else {
+        this.logWrapper(this.compileExpression, 'expression');
+        this.vw.writePop(segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
+      }
     }
+  }
 
-    this.eat(';');
+  compileAssignmentOperator(token) {
+    if (token === '^=') this.vw.writeCall('Math.xor', 2);
+    else if (token === '+=') this.vw.writeArithmetic(Commands.ADD);
+    else if (token === '-=') this.vw.writeArithmetic(Commands.SUB);
+    else if (token === '*=') this.vw.writeCall('Math.multipy', 2);
+    else if (token === '/=') this.vw.writeCall('Math.divide', 2);
+    else if (token === '&=') this.vw.writeArithmetic(Commands.AND);
+    else if (token === '|=') this.vw.writeArithmetic(Commands.OR);
   }
 
   compileIfStatement() {
@@ -406,48 +869,120 @@ class CompilationEngine {
     this.vw.writeIf(IF_FALSE);
 
     this.eat(')');
-    this.eat('{');
-    this.logWrapper(this.compileStatements, 'statements');
-    this.eat('}');
+
+    if (this.tokenOneOf([IDENTIFIER, KEYWORD]) && this.enableExtensions) {
+      this.logWrapper(this.compileStatement, 'single_statement');
+    } else {
+      this.logWrapper(this.compileBlockStatement, 'block_statements');
+    }
 
     if (this.tokenOneOf(ELSE)) {
       this.eat(ELSE);
-      this.eat('{');
 
       this.vw.writeGoto(IF_END);
       this.vw.writeLabel(IF_FALSE);
-      this.logWrapper(this.compileStatements, 'statements');
+
+      if (this.tokenOneOf([IDENTIFIER, KEYWORD]) && this.enableExtensions) {
+        this.logWrapper(this.compileStatement, 'single_statement');
+      } else {
+        this.logWrapper(this.compileBlockStatement, 'block_statements');
+      } 
+
       this.vw.writeLabel(IF_END);
 
-      this.eat('}');
     } else {
       this.vw.writeLabel(IF_FALSE);
     }
   }
 
+  compileForStatement() {
+    if (!this.enableExtensions) {
+      console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+      \tFor statements are an extension to the language, please use the -x flag(hint: '${this.tk.line}')`);
+      process.exit(1);
+    }
+    this.st.nest();
+    const oldContinueLabel = this.continueLabel;
+    const oldBreakLabel = this.breakLabel;
+    this.eat(FOR);
+    this.eat('(');
+
+    const [FOR_TEST, FOR_INCR, FOR_BODY, FOR_END] = this.genLabel('for');
+    this.continueLabel = FOR_INCR;
+    this.breakLabel = FOR_END;
+    if (this.tokenOneOf([VAR])) // Locals can be declared
+      this.logWrapper(this.compileVarDec, 'for_var_decl');
+    if (this.tokenOneOf([IDENTIFIER]))
+      this.logWrapper(this.compileAssignments, 'for_init');
+    this.eat(';')
+    this.vw.writeLabel(FOR_TEST);
+    if (!this.tokenOneOf([';'])) {
+      this.logWrapper(this.compileExpression, 'for_test');
+      this.vw.writeIf(FOR_BODY);
+    } else this.vw.writeGoto(FOR_BODY);
+    this.eat(';');
+    this.vw.writeGoto(FOR_END);
+    this.vw.writeLabel(FOR_INCR);
+    if (this.tokenOneOf([IDENTIFIER])) 
+      this.logWrapper(this.compileAssignments, 'for_incr');
+    this.vw.writeGoto(FOR_TEST);
+    this.eat(')');
+
+    this.vw.writeLabel(FOR_BODY);
+    if (this.tokenOneOf([IDENTIFIER, KEYWORD]) && this.enableExtensions) {
+      this.logWrapper(this.compileStatement, 'single_statements');
+    } else {
+      this.logWrapper(this.compileBlockStatement, 'block_statements');
+    }
+    this.vw.writeGoto(FOR_INCR);
+    this.vw.writeLabel(FOR_END);
+    this.continueLabel = oldContinueLabel;
+    this.breakLabel = oldBreakLabel;
+    this.st.unnest();
+  }
+
   compileWhileStatement() {
+    const oldContinueLabel = this.continueLabel;
+    const oldBreakLabel = this.breakLabel;
     this.eat(WHILE);
     this.eat('(');
 
     const [WHILE_EXP, WHILE_END] = this.genLabel('while');
+    this.continueLabel = WHILE_EXP;
+    this.breakLabel = WHILE_END;
     this.vw.writeLabel(WHILE_EXP);
     this.logWrapper(this.compileExpression, 'expression');
     this.vw.writeArithmetic(Commands.NOT);
     this.vw.writeIf(WHILE_END);
 
     this.eat(')');
-    this.eat('{');
 
-    this.logWrapper(this.compileStatements, 'statements');
-
+    if (this.tokenOneOf([IDENTIFIER, KEYWORD]) && this.enableExtensions) {
+      this.logWrapper(this.compileStatement, 'single_statements');
+    } else {
+      this.logWrapper(this.compileBlockStatement, 'block_statements');
+    }
     this.vw.writeGoto(WHILE_EXP);
-    this.eat('}');
     this.vw.writeLabel(WHILE_END);
+    this.continueLabel = oldContinueLabel;
+    this.breakLabel = oldBreakLabel;
+  }
+
+  compileBlockStatement() {
+    this.st.nest();
+
+    this.eat('{');
+    while (this.tokenOneOf(VAR))
+      this.logWrapper(this.compileVarDec, 'block_local');
+    for (let i = 0; i < Object.keys(this.st.subScopes[this.st.subScopes.length - 1]).length; i++)
+      this.vw.writePush(Segments.CONST, 0);
+    this.logWrapper(this.compileStatements, 'block_statements');
+    this.eat('}');
+    this.st.unnest();
   }
 
   compileSubroutineCall(identifier) {
-    const logData = {kind: this.st.kindOf(identifier), index: this.st.indexOf(identifier), defined: false, identifier};
-
+    const logData = { kind: this.st.kindOf(identifier), index: this.st.indexOf(identifier), defined: false, identifier };
     if (this.tk.symbol() === '.') {
       this.log({
         type: 'identifierToken', data: {
@@ -457,7 +992,7 @@ class CompilationEngine {
       });
       this.eat('.');
 
-      const {token: subroutineName} = this.eat(IDENTIFIER);
+      const { token: subroutineName } = this.eat(IDENTIFIER);
       this.log({
         type: 'identifierToken', data: {
           category: 'subroutineName',
@@ -482,9 +1017,8 @@ class CompilationEngine {
 
       this.eat(')');
     } else if (this.tk.symbol() === '(') { // calling method from the class that declares it
-      this.log({type: 'identifierToken', data: {...logData, category: 'subroutineName'}});
+      this.log({ type: 'identifierToken', data: { ...logData, category: 'subroutineName' } });
       this.eat('(');
-
       if (this.st.exists('this')) { // inside another method
         this.vw.writePush(Segments.ARG, 0);
       } else { // inside constructor
@@ -494,14 +1028,17 @@ class CompilationEngine {
       this.vw.writeCall(`${this.className}.${identifier}`, nArgs);
 
       this.eat(')');
+
     } else {
-      throw new Error('Failed to see "(" or "." token');
+      console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+      \tExpected '(' or '.' (hint: '${this.tk.line}')`);
+      process.exit(1);
     }
   }
 
   compileDoStatement() {
     this.eat(DO);
-    const {token: identifier} = this.eat(IDENTIFIER);
+    const { token: identifier } = this.eat(IDENTIFIER);
 
     this.compileSubroutineCall(identifier);
 
@@ -511,7 +1048,7 @@ class CompilationEngine {
 
   compileReturnStatement() {
     this.eat(RETURN);
-    if (this.tokenOneOf([INT_CONST, STRING_CONST, ...KEYWORD_CONSTANT, IDENTIFIER, '(', '-', '~'])) {
+    if (this.tokenOneOf([INT_CONST, STRING_CONST, ...KEYWORD_CONSTANT, IDENTIFIER, '(', '-', '~', '@', '#@', '!', '#!'])) {
       this.logWrapper(this.compileExpression, 'expression');
     } else {
       this.vw.writePush(Segments.CONST, 0);
@@ -524,71 +1061,159 @@ class CompilationEngine {
   compileExpression() {
     this.logWrapper(this.compileTerm, 'term');
 
-    while (this.tokenOneOf(['+', '-', '*', '/', '&', '|', '<', '>', '='])) {
-      const {token, tokenType} = this.eat(this.tk.symbol());
-      this.logWrapper(this.compileTerm, 'term');
+    while (this.tokenOneOf(['+', '-', '*', '/', '&', '|', '<', '>', '=',
+                            '%', '<=', '>=', '~=', '^', '>>', '>>>', '<<', '||', '&&', '?'])) {
+      const { token, tokenType } = this.eat(this.tk.symbol());
+      if (['||', '&&', '?'].includes(token) && this.enableExtensions) {
+          this.compileLogicalOperator(token);
+      } else {
+        this.logWrapper(this.compileTerm, 'term');
+  
+        if (token === '+') { this.vw.writeArithmetic(Commands.ADD); }
+        else if (token === '-') { this.vw.writeArithmetic(Commands.SUB); }
+        else if (token === '*') { this.vw.writeCall('Math.multiply', 2); }
+        else if (token === '/') { this.vw.writeCall('Math.divide', 2); }
+        else if (token === '&') { this.vw.writeArithmetic(Commands.AND); }
+        else if (token === '|') { this.vw.writeArithmetic(Commands.OR); }
+        else if (token === '<') { this.vw.writeArithmetic(Commands.LT); }
+        else if (token === '>') { this.vw.writeArithmetic(Commands.GT); }
+        else if (token === '=') { this.vw.writeArithmetic(Commands.EQ); }
+        else if (this.enableExtensions) {
+          if (token === '%') { this.vw.writeCall('Math.mod', 2); }
+          else if (token === '<=') { this.vw.writeCall('Math.le', 2); }
+          else if (token === '>=') { this.vw.writeCall('Math.ge', 2); }
+          else if (token === '~=') { this.vw.writeCall('Math.neq', 2); }
+          else if (token === '^') { this.vw.writeCall('Math.xor', 2); }
+          else if (token === '>>') { this.vw.writeCall('Math.shra', 2); }
+          else if (token === '>>>') { this.vw.writeCall('Math.shrl', 2); }
+          else if (token === '<<') { this.vw.writeCall('Math.shll', 2); }
+        }
+        else { 
+          console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+          \tThis operation is only available enabling extensions (-x) (hint: '${this.tk.line}')`);
+          process.exit(1);
+        }
+      }
+    }
+  }
 
-      if (token === '+') { this.vw.writeArithmetic(Commands.ADD); }
-      else if (token === '-') { this.vw.writeArithmetic(Commands.SUB); }
-      else if (token === '*') { this.vw.writeCall('Math.multiply', 2); }
-      else if (token === '/') { this.vw.writeCall('Math.divide', 2); }
-      else if (token === '&') { this.vw.writeArithmetic(Commands.AND); }
-      else if (token === '|') { this.vw.writeArithmetic(Commands.OR); }
-      else if (token === '<') { this.vw.writeArithmetic(Commands.LT); }
-      else if (token === '>') { this.vw.writeArithmetic(Commands.GT); }
-      else if (token === '=') { this.vw.writeArithmetic(Commands.EQ); }
+  compileLogicalOperator(op) {
+    if (op === '&&') {
+      const [SHORT, END] = this.genLabel('if');
+      this.vw.writeArithmetic(Commands.NOT);
+      this.vw.writeIf(SHORT);
+      this.logWrapper(this.compileTerm, 'term');
+      this.vw.writeGoto(END);
+      this.vw.writeLabel(SHORT);
+      this.vw.writePush(Segments.CONST, 0); // false
+      this.vw.writeLabel(END);
+    }
+    else if (op === '||') {
+      const [SHORT, END] = this.genLabel('if');
+      this.vw.writeIf(SHORT);
+      this.logWrapper(this.compileTerm, 'term');
+      this.vw.writeGoto(END);
+      this.vw.writeLabel(SHORT);
+      this.vw.writePush(Segments.CONST, -1); // true
+      this.vw.writeLabel(END);
+    } else if (op === '?') {
+      const [IF_FALSE, IF_END] = this.genLabel('if');
+      this.vw.writeArithmetic(Commands.NOT);
+      this.vw.writeIf(IF_FALSE);
+      this.logWrapper(this.compileExpression, 'true_expression');
+      this.vw.writeGoto(IF_END);
+      this.eat(":");
+      this.vw.writeLabel(IF_FALSE);
+      this.logWrapper(this.compileExpression, 'false_expression');
+      this.vw.writeLabel(IF_END);
     }
   }
 
   compileTerm() {
     if (this.tokenOneOf(IDENTIFIER)) {
-      const {token: identifier} = this.eat(IDENTIFIER);
-      const logData = {kind: this.st.kindOf(identifier), defined: false, index: this.st.indexOf(identifier), identifier};
+      const { token: identifier } = this.eat(IDENTIFIER);
+      const logData = { kind: this.st.kindOf(identifier), defined: false, index: this.st.indexOf(identifier), identifier };
 
       if (this.tokenOneOf(['.', '('])) {
         this.compileSubroutineCall(identifier);
       } else if (this.tk.symbol() === '[') {
-        this.log({type: 'identifierToken', data: {...logData, category: 'varName'}});
+        this.log({ type: 'identifierToken', data: { ...logData, category: 'varName' } });
         this.eat('[');
 
         this.vw.writePush(segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
         this.logWrapper(this.compileExpression, 'expression');
+        if (this.enableExtensions) {
+          this.vw.writePush(Segments.CONST, 2);
+          this.vw.writeCall("Math.shll", 2)
+        }
         this.vw.writeArithmetic(Commands.ADD);
         this.vw.writePop(Segments.POINTER, 1);
         this.vw.writePush(Segments.THAT, 0);
 
         this.eat(']');
-      } else { // plain variable
-        this.log({type: 'identifierToken', data: {...logData, category: 'varName'}});
+      } else if (this.tk.symbol() === '#' && this.enableExtensions) {
+        this.log({ type: 'identifierToken', data: { ...logData, category: 'varName' } });
+        this.eat('#');
+        this.eat('[');
 
+        this.vw.writePush(segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
+        this.logWrapper(this.compileExpression, 'expression');
+        this.vw.writeArithmetic(Commands.ADD);
+        this.vw.writePop(Segments.POINTER, 2);
+        this.vw.writePush(Segments.THATB, 0);
+
+        this.eat(']');
+
+      } else { // plain variable
+        this.log({ type: 'identifierToken', data: { ...logData, category: 'varName' } });
         this.vw.writePush(segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
       }
     } else if (this.tokenOneOf('(')) {
       this.eat('(');
       this.logWrapper(this.compileExpression, 'expression');
       this.eat(')');
-    } else if (this.tokenOneOf(['-', '~'])) { // unaryOp term
-      const {token} = this.eat(this.tk.symbol());
-      this.logWrapper(this.compileTerm, 'term');
 
-      if (token === '-') {
-        this.vw.writeArithmetic(Commands.NEG);
-      } else if (token === '~') {
-        this.vw.writeArithmetic(Commands.NOT);
-      }
-    } else {
-      const {token, tokenType} = this.eat([INT_CONST, STRING_CONST, ...KEYWORD_CONSTANT]);
-
-      if (tokenType === INT_CONST) {
-        this.vw.writePush(Segments.CONST, token);
-      } else if (tokenType === STRING_CONST) {
+    } else if (this.tokenOneOf([STRING_CONST])) {
+      const { token, tokenType } = this.eat(STRING_CONST);
+      if (this.enableExtensions) {
+        this.vw.writeConstString(token);
+      } else {
         this.vw.writePush(Segments.CONST, token.length);
         this.vw.writeCall('String.new', 1);
-
         [...token].forEach((char, i) => {
           this.vw.writePush(Segments.CONST, char.charCodeAt());
           this.vw.writeCall('String.appendChar', 2)
         });
+      }
+    } else if (this.tokenOneOf(['-', '~', '@', '#@', '!', '#!'])) { // unaryOp term
+      const { token } = this.eat(this.tk.symbol());
+      if (token === '@') {
+        this.compileReference();
+      } else if (token === '#@') {
+        this.compileReferenceChar()
+      } else if (token === '!'){
+        this.compileDereference();
+        this.vw.writePop(Segments.POINTER, 1);
+        this.vw.writePush(Segments.THAT, 0);
+      } else if (token === '#!'){
+        this.compileDereferenceChar();
+        this.vw.writePop(Segments.POINTER, 2);
+        this.vw.writePush(Segments.THATB, 0);
+      }
+      else {
+        this.logWrapper(this.compileTerm, 'term');
+  
+        if (token === '-') {
+          this.vw.writeArithmetic(Commands.NEG);
+        } else if (token === '~') {
+          this.vw.writeArithmetic(Commands.NOT);
+        }
+      }
+    } else {
+      const { token, tokenType } = this.eat([INT_CONST, ...KEYWORD_CONSTANT]);
+
+      if (tokenType === INT_CONST) {
+        this.vw.writePush(Segments.CONST, token);
       } else if (token === NULL || token === FALSE) {
         this.vw.writePush(Segments.CONST, 0);
       } else if (token === TRUE) {
@@ -606,7 +1231,7 @@ class CompilationEngine {
 
   compileExpressionList() {
     let count = 0;
-    if (this.tokenOneOf([INT_CONST, STRING_CONST, ...KEYWORD_CONSTANT, IDENTIFIER, '(', '-', '~'])) {
+    if (this.tokenOneOf([INT_CONST, STRING_CONST, ...KEYWORD_CONSTANT, IDENTIFIER, '(', '-', '~', '!', '#!', '@', '#@'])) {
       this.logWrapper(this.compileExpression, 'expression');
       count++;
 

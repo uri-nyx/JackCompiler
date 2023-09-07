@@ -11,6 +11,7 @@ const Segments = new Enum({
   THAT: {value: 5, description: 'that'},
   POINTER: {value: 6, description: 'pointer'},
   TEMP: {value: 7, description: 'temp'},
+  THATB: {value: 8, description: 'thatb'},
 });
 
 const Commands = new Enum({
@@ -34,15 +35,24 @@ class VMWriter {
     fs.appendFileSync(this.outputFile, str + '\n');
   }
 
+  writePushRef(type, segment, index) {
+    assert(Segments.contains(segment), `Segment is not valid.`);
+    assert(Number.isInteger(index), 'index must be an integer');
+    this.write(`#pushref ${type} ${segment.display} ${index}`);
+  }
+
   writePush(segment, index) {
-    assert(Segments.contains(segment), 'Segment must be a Segments.CONST, Segments.ARG, etc');
-    assert(Number.isInteger(index) && index >= 0, 'index must be an integer >= 0');
+    assert(Segments.contains(segment), `Segment is not valid.`);
+    assert(Number.isInteger(index), 'index must be an integer');
+    if (Segments.CONST !== segment) {
+      assert( index >= 0, 'index must be >= 0');
+    }
 
     this.write(`push ${segment.display} ${index}`);
   }
 
   writePop(segment, index) {
-    assert(Segments.contains(segment), 'Segment must be a Segments.CONST, Segments.ARG, etc');
+    assert(Segments.contains(segment), `Segment is not valid.`);
     assert(Number.isInteger(index) && index >= 0, 'index must be an integer >= 0');
     assert.notEqual(segment, Segments.CONST, 'Cannot pop constant');
 
@@ -81,6 +91,10 @@ class VMWriter {
 
   writeReturn() {
     this.write('return');
+  }
+
+  writeConstString(str) {
+    this.write(`#cstring "${str}"`);
   }
 
   close() {

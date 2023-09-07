@@ -1,0 +1,11 @@
+class Test {
+    function void main() {
+        var int t;
+        do Test.isr(t);
+        return;
+    }
+
+    function void isr(int i) {
+        return;
+    }
+}

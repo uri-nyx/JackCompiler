@@ -10,6 +10,7 @@ const argv = yargs
     return fs.existsSync(argv._[0]);
   })
   .boolean('enable-parse-tree')
+  .boolean('enable-extensions')
   .options({
     'suffix': {
       alias: 's',
@@ -19,6 +20,10 @@ const argv = yargs
     'enable-parse-tree': {
       alias: 'p',
       describe: 'Writes the source parse tree to XML',
+    },
+    'enable-extensions': {
+      alias: 'x',
+      describe: 'Enables non standard extensions',
     },
   })
   .fail((msg, err, yargs) => {
@@ -51,6 +56,6 @@ files.forEach(f => {
     name: inputParsed.name + argv["suffix"],
   });
   console.log(`Compiling ${path.relative(process.cwd(), f)} -> ${path.relative(process.cwd(), output)}.vm`);
-  const ce = new CompilationEngine(input, output, argv['enable-parse-tree']);
+  const ce = new CompilationEngine(input, output, argv['enable-parse-tree'], argv['enable-extensions']);
   ce.dispose();
 })
