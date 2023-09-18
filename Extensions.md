@@ -2,6 +2,7 @@
 
 ## TODO
 
+- [ ] *Rewrite this in a statically typed language*
 - [~] *Complete overhaul of error messages*
 - [ ] *Initialization of static variables*
 - [x] *Fix scope problems*
@@ -10,6 +11,10 @@
 - [ ] *Inline assembly*
 - [ ] *Some type checking (for int and char at least)?*
 - [ ] *Structs?*
+- [ ] *Peephole optimizer*
+- [x] *Static arrays in BSS/data*
+- [~] *Array initialization*
+- [ ] *Enums*
 
 ## Optimizations
 
@@ -28,6 +33,7 @@
 - *Local variables inside nested scopes*: scopes are introduced by braces `{}`, and declarations can shadow symbols in outer scopes. For loops can also optionally declare variables in their initialization.
 - *Goto statement and label declaration*: `goto` jumps to a label declared within the class, `goto label;`, `anchor` declares a label (labels don't shadow other symbols), `anchor label:`.
 - *Memory operators*: `@` gets a reference to an `int`, `@c` to a `char` (they are rvalues, assigning to their result is not possible), `!` and `!c` dereferences a term.`#[]` accesses the nth byte of an array `a#[n]`. Both are legal to use as terms in expresions and as lhs of assignements.
+- *Static array initialization*: `static` class level arrays can be initialized and/or reserved spaced in the data segement thus: `static Array A[3] = {1, N, "HELLO"}, B[5]`, where `A` is pointed to an initialized array of three elements (initializers must be constant expressions, the string litteral is allocated in the data segment and it's pointer stored in the array), and `B` is a reserved space of 5 *words* in the static segment. Only word sized arrays (int) can be initialized thus. Byte arrays are essentially strings.
 
 ## Notes
 

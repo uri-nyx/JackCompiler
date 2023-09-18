@@ -1,11 +1,16 @@
 class Test {
-    function void main() {
-        var int t;
-        do Test.isr(t);
-        return;
-    }
+    const NJ = 0xdead;
+    static Array A[4] = {10, NJ, "Hello", 0}, B[5], X;
 
-    function void isr(int i) {
+    function void main() {
+        do TextMode.printInt(A[0]);
+        do TextMode.printLn();
+        do TextMode.printInt(A[1]);
+        do TextMode.printLn();
+        do TextMode.print(A[2]);
+        do TextMode.printLn();
+        do TextMode.printInt(A[0]);
+        do TextMode.printLn();
         return;
     }
 }

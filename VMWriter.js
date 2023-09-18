@@ -93,8 +93,16 @@ class VMWriter {
     this.write('return');
   }
 
-  writeConstString(str) {
-    this.write(`#cstring "${str}"`);
+  writeConstString(lab, str) {
+    this.write(`#cstring ${lab} "${str}"`);
+  }
+
+  writeStaticArray(id, size, array) {
+    this.write(`#array ${id} ${size} ${array}`);
+  }
+
+  resStaticArray(id, size) {
+    this.write(`#res ${id} ${size}`)
   }
 
   close() {

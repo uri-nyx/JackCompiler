@@ -231,6 +231,9 @@ class CompilationEngine {
 
     const { token: identifier } = this.eat(IDENTIFIER);
     this.st.define(identifier, typeIdentifier.display || typeIdentifier, kind);
+    if (["Array"].includes(typeIdentifier) && this.tokenOneOf(['[']) && kind === SymbolTableKinds.STATIC  && this.enableExtensions) {
+      this.parseStaticArray(identifier);
+    }
     this.log({
       type: 'identifierToken', data: {
         category: "varName",
@@ -246,6 +249,9 @@ class CompilationEngine {
 
       const { token: identifier } = this.eat(IDENTIFIER);
       this.st.define(identifier, typeIdentifier.display || typeIdentifier, kind);
+      if (["Array"].includes(typeIdentifier) && this.tokenOneOf(['[']) && kind === SymbolTableKinds.STATIC  && this.enableExtensions) {
+        this.parseStaticArray(identifier);
+      }
       this.log({
         type: 'identifierToken', data: {
           category: "varName",
@@ -257,6 +263,54 @@ class CompilationEngine {
       });
     }
     this.eat(';');
+  }
+
+  parseStaticArray(identifier) {
+    let sz;
+    this.eat('[');
+    const { token: size, kind: k } = this.eat([INT_CONST, IDENTIFIER]);
+    if (k === SymbolTableKinds.CLASS_CONST) sz = this.st.indexOf(size);
+    else sz = size;
+    this.eat(']');
+    if (this.tokenOneOf(['='])) {
+      this.eat('=');
+      this.initStaticArray(this.st.indexOf(identifier), size);
+    } else {
+      this.vw.resStaticArray(this.st.indexOf(identifier), size);
+    }
+  }
+
+  initStaticArray(id, size) {
+    this.eat('{');
+    let array = [];
+    for (let i = 0; i < size; i++) {
+      if (this.tokenOneOf([INT_CONST])) {
+        const {token: n} = this.eat(INT_CONST);
+        array[i] = n;
+      } else if (this.tokenOneOf([IDENTIFIER])) {
+        const {token: ident} = this.eat(IDENTIFIER);
+        if (this.st.kindOf(ident) === SymbolTableKinds.CLASS_CONST)
+          array[i] = this.st.indexOf(ident);
+        else {
+          console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+          \tStatic array initializers can only contain constant expressions: ${ident} (hint: '${this.tk.line}')`);
+          exit(1);
+        }
+      } else if (this.tokenOneOf([STRING_CONST])) {
+        const {token: s} = this.eat(STRING_CONST);
+        let l = `s${id}${size}`;
+        this.vw.writeConstString(l, s);
+        array[i] = l;
+      } else {
+        const tk = this.getToken(this.tk.tokenType());
+        console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+        \tStatic array initializers can only contain constant expressions: ${tk} (hint: '${this.tk.line}')`);
+        exit(1);
+      }
+      if (i < size-1) this.eat(',');
+    }
+    this.eat('}');
+    this.vw.writeStaticArray(id, size, array);
   }
 
   compileConstDec(kind) {
@@ -307,7 +361,6 @@ class CompilationEngine {
       if (this.tokenOneOf(['-', '+', '~'])) {
         const { token }  = this.eat(['-', '+', '~'])
         const { token: n, tokenType } = this.eat(INT_CONST);
-        console.log(n);
   
         let constant;
         if (token === '-') constant = -n;
@@ -1176,7 +1229,7 @@ class CompilationEngine {
     } else if (this.tokenOneOf([STRING_CONST])) {
       const { token, tokenType } = this.eat(STRING_CONST);
       if (this.enableExtensions) {
-        this.vw.writeConstString(token);
+        this.vw.writeConstString(null, token);
       } else {
         this.vw.writePush(Segments.CONST, token.length);
         this.vw.writeCall('String.new', 1);
