@@ -36,7 +36,12 @@ const TokenKeywords = new Enum({
   CONTINUE: { value: 23, description: 'continue' },
   FOR: { value: 24, description: 'for' },
   GOTO: { value: 25, description: 'goto' },
-  ANCHOR: { value: 25, description: 'anchor' },
+  ANCHOR: { value: 26, description: 'anchor' },
+  PRIVATE: { value: 27, description: 'private' },
+  STRUCT: { value: 28, description: 'struct' },
+  ENUM: { value: 29, description: 'enum' },
+  USE: { value: 30, description: 'use' },
+  EXPORT: { value: 31, description: 'export' },
 });
 
 class JackTokenizer {
@@ -87,9 +92,9 @@ class JackTokenizer {
       }
       this.lineIndex = 0;
     }
-    const keywordRe = "\\b(class|constructor|function|method|field|static|var|const|int|char|boolean|void|true|false|null|this|let|do|if|else|while|return|break|continue|for|goto|anchor)\\b";
+    const keywordRe = "\\b(export|class|use|enum|struct|constructor|function|method|field|static|var|const|int|char|boolean|void|true|false|null|this|let|do|if|else|while|return|break|continue|for|goto|anchor|private)\\b";
     const identifierRe = "\\b([a-z][a-z_0-9]*)\\b";
-    const symbolRe = "(\\^=|~=|>=|<=|\\+=|-=|\\*=|\\\/=|&=|\\|=|&&|\\|\\||<<|>>>|>>|#@|#!|[\\-\\[\\]{}\\(\\)\\.,\\;\\+\\*\\\/&\\|<>=~\\?:%\\^#@!])";
+    const symbolRe = "(\\^=|~=|>=|<=|\\+=|-=|\\*=|\\\/=|&=|\\|=|&&|\\|\\||<<|>>>|>>|\\$@|\\$!|#@|#!|::|[\\-\\[\\]{}\\(\\)\\.,\\;\\+\\*\\\/&\\|<>=~\\?:%\\^#@!\\$])";
     const intConstRe = "((?:'.')|(?:0x[A-Fa-f0-9]+)|(?:\\d+))";
     const stringConstRe = '"(.+)"';
     const tokens = new RegExp([keywordRe, identifierRe, symbolRe, intConstRe, stringConstRe].join('|'), "gi");

@@ -1,0 +1,3 @@
+const PI = 314159;
+enum {ZZ, XS, FF:12, GD: -1}
+struct JJ {a, b:10, c}

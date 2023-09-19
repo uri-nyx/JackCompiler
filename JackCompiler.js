@@ -56,6 +56,6 @@ files.forEach(f => {
     name: inputParsed.name + argv["suffix"],
   });
   console.log(`Compiling ${path.relative(process.cwd(), f)} -> ${path.relative(process.cwd(), output)}.vm`);
-  const ce = new CompilationEngine(input, output, argv['enable-parse-tree'], argv['enable-extensions']);
+  const ce = new CompilationEngine(dir, input, output, argv['enable-parse-tree'], argv['enable-extensions']);
   ce.dispose();
 })

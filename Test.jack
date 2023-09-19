@@ -1,16 +1,12 @@
 class Test {
-    const NJ = 0xdead;
-    static Array A[4] = {10, NJ, "Hello", 0}, B[5], X;
-
-    function void main() {
-        do TextMode.printInt(A[0]);
-        do TextMode.printLn();
-        do TextMode.printInt(A[1]);
-        do TextMode.printLn();
-        do TextMode.print(A[2]);
-        do TextMode.printLn();
-        do TextMode.printInt(A[0]);
-        do TextMode.printLn();
-        return;
+    use { "use/stdtypes.jackh" }
+    static int f;
+    function int main () {
+        f = ::PI;
+        f = ::5;
+        f = ::(4 + 2 + f);
+        export 5 {$@Test.main, @f}
+        export (5+6-f) {f}
+        return 0;
     }
 }

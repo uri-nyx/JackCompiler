@@ -1,4 +1,5 @@
 const fs = require('fs');
+const path = require('path');
 const { JackTokenizer, TokenTypes, TokenKeywords } = require('./JackTokenizer');
 const { SymbolTable, SymbolTableKinds } = require('./SymbolTable');
 const { VMWriter, Segments, Commands } = require('./VMWriter');
@@ -8,7 +9,8 @@ const { exit } = require('yargs');
 const { KEYWORD, SYMBOL, IDENTIFIER, INT_CONST, STRING_CONST } = TokenTypes;
 const {
   CLASS, METHOD, FUNCTION, CONSTRUCTOR, INT, BOOLEAN, CHAR, VOID, VAR, STATIC, FIELD, LET,
-  DO, IF, ELSE, WHILE, FOR, RETURN, TRUE, FALSE, NULL, THIS, CONST, BREAK, CONTINUE, GOTO, ANCHOR
+  DO, IF, ELSE, WHILE, FOR, RETURN, TRUE, FALSE, NULL, THIS, CONST, BREAK, CONTINUE, GOTO, 
+  ANCHOR, PRIVATE, STRUCT, ENUM, USE, EXPORT
 } = TokenKeywords;
 const tokenMethod = new Map([
   [KEYWORD, JackTokenizer.prototype.keyword],
@@ -29,7 +31,8 @@ const segment = kind => {
 }
 
 class CompilationEngine {
-  constructor(inputFile, outputFile, enableLog = false, enableExtensions = false) {
+  constructor(dir, inputFile, outputFile, enableLog = false, enableExtensions = false) {
+    this.dir = dir;
     this.inputFile = inputFile;
     this.tk = new JackTokenizer(inputFile);
     this.st = new SymbolTable();
@@ -193,21 +196,96 @@ class CompilationEngine {
 
     this.eat('{');
 
-    while (this.tokenOneOf([STATIC, FIELD, CONST])) {
+    if (this.tokenOneOf([USE]) && this.enableExtensions) {
+      this.compileUse();
+    }
+
+    while (this.tokenOneOf([STATIC, FIELD, CONST, STRUCT, ENUM])) {
       this.logWrapper(this.compileClassVarDec, 'classVarDec');
     }
 
-    while (this.tokenOneOf([CONSTRUCTOR, FUNCTION, METHOD])) {
+    while (this.tokenOneOf([PRIVATE, CONSTRUCTOR, FUNCTION, METHOD])) {
       this.logWrapper(this.compileSubroutineDec, 'subroutineDec');
     }
 
     this.eat('}');
   }
 
+  compileUse() {
+    this.eat(USE);
+    this.eat('{');
+    const {token: fname} = this.eat(STRING_CONST);
+    const old_tk = this.tk;
+
+    const declarations = path.format({
+      dir: this.dir,
+      base: fname,
+    });
+
+    this.tk = new JackTokenizer(declarations);
+    if (this.tk.hasMoreTokens()) {
+      this.tk.advance(); // set the first token
+      while (this.tokenOneOf([CONST, STRUCT, ENUM])) {
+        if (this.tokenOneOf([CONST])) this.compileConstDec(SymbolTableKinds.CLASS_CONST);
+        else if (this.tokenOneOf([STRUCT])) this.compileStructDec();
+        else if (this.tokenOneOf([ENUM])) this.compileEnumDec();
+      }
+    }
+
+    this.tk = old_tk
+
+    while (this.tokenOneOf(',')) {
+      this.eat(',');
+      const {token: fname} = this.eat(STRING_CONST);
+      const old_tk = this.tk;
+
+      const declarations = path.format({
+        dir: this.dir,
+        base: fname,
+      });
+  
+      this.tk = new JackTokenizer(declarations);
+      if (this.tk.hasMoreTokens()) {
+        this.tk.advance(); // set the first token
+        while (this.tokenOneOf([CONST, STRUCT, ENUM])) {
+          if (this.tokenOneOf([CONST])) this.compileConstDec(SymbolTableKinds.CLASS_CONST);
+          else if (this.tokenOneOf([STRUCT])) this.compileStructDec();
+          else if (this.tokenOneOf([ENUM])) this.compileEnumDec();
+        }
+      }
+      this.tk = old_tk
+    }
+    this.eat('}');
+  }
+
+  compileExportStatement() {
+    assert(this.enableExtensions);
+    this.eat(EXPORT); // export N {Function, FunctionB, Function};
+    this.compileExpression();
+    this.vw.writePop(Segments.TEMP, 3); // offset into global pointer
+    this.eat('{');
+    this.compileTerm();
+    this.vw.writePopCommon(3); // Pop Common auto-increments the offset
+
+    while (this.tokenOneOf([','])) {
+      this.eat(',');
+      this.compileTerm();
+      this.vw.writePopCommon(3);
+    }
+
+    this.eat('}');
+  }
+
   compileClassVarDec() {
-    if (this.enableExtensions) {
+    if (this.enableExtensions) { 
       while (this.tokenOneOf([CONST])) {
         this.logWrapper(this.compileConstDec, 'constDec', SymbolTableKinds.CLASS_CONST);
+      }
+      while (this.tokenOneOf([ENUM])) {
+        this.logWrapper(this.compileEnumDec, 'enumDec', SymbolTableKinds.CLASS_CONST);
+      }
+      while (this.tokenOneOf([STRUCT])) {
+        this.logWrapper(this.compileStructDec, 'structtDec', SymbolTableKinds.CLASS_CONST);
       }
     }
 
@@ -268,15 +346,15 @@ class CompilationEngine {
   parseStaticArray(identifier) {
     let sz;
     this.eat('[');
-    const { token: size, kind: k } = this.eat([INT_CONST, IDENTIFIER]);
-    if (k === SymbolTableKinds.CLASS_CONST) sz = this.st.indexOf(size);
+    const { token: size} = this.eat([INT_CONST, IDENTIFIER]);
+    if (this.st.kindOf(size) === SymbolTableKinds.CLASS_CONST) sz = this.st.indexOf(size);
     else sz = size;
     this.eat(']');
     if (this.tokenOneOf(['='])) {
       this.eat('=');
-      this.initStaticArray(this.st.indexOf(identifier), size);
+      this.initStaticArray(this.st.indexOf(identifier), sz);
     } else {
-      this.vw.resStaticArray(this.st.indexOf(identifier), size);
+      this.vw.resStaticArray(this.st.indexOf(identifier), sz);
     }
   }
 
@@ -376,9 +454,106 @@ class CompilationEngine {
     this.eat(';');
   }
 
+  compileEnumDec() {
+    this.eat(ENUM);
+
+    this.eat('{');
+    let current = 0;
+    const { token: identifier } = this.eat(IDENTIFIER);
+    if (this.tk.symbol() == ':') {
+      this.eat(':');
+      if (this.tokenOneOf(['-', '+', '~'])) {
+        const { token }  = this.eat(['-', '+', '~'])
+        const { token: n, tokenType } = this.eat(INT_CONST);
+  
+        let constant;
+        if (token === '-') constant = -n;
+        if (token === '~') constant = ~n;
+        if (token === '+') constant = +n;
+  
+        current = constant
+      } else {
+        const { token: n, tokenType } = this.eat(INT_CONST);
+        current = n;
+      }
+    }
+
+    this.st.define(`${identifier}`, INT_CONST, SymbolTableKinds.CLASS_CONST, current);
+    current++;
+
+    while (this.tokenOneOf(',')) {
+      this.eat(',');
+      const { token: identifier } = this.eat(IDENTIFIER);
+      if (this.tk.symbol() == ':') {
+        this.eat(':');
+        if (this.tokenOneOf(['-', '+', '~'])) {
+          const { token }  = this.eat(['-', '+', '~'])
+          const { token: n, tokenType } = this.eat(INT_CONST);
+    
+          let constant;
+          if (token === '-') constant = -n;
+          if (token === '~') constant = ~n;
+          if (token === '+') constant = +n;
+    
+          current = constant
+        } else {
+          const { token: n, tokenType } = this.eat(INT_CONST);
+          current = n;
+        }
+      }
+      this.st.define(`${identifier}`, INT_CONST, SymbolTableKinds.CLASS_CONST, current);
+      current++;
+    }
+    this.eat('}');
+  }
+
+  compileStructDec() {
+    this.eat(STRUCT);
+
+    const { token: base } = this.eat(IDENTIFIER);
+    this.eat('{');
+    let offset = 0;
+    let size = 1;
+    const { token: identifier } = this.eat(IDENTIFIER);
+    if (this.tk.symbol() == ':') {
+      this.eat(':');
+      const { token: s } = this.eat(INT_CONST);
+      size = s;
+    }
+
+    this.st.define(`${base}_${identifier}`, INT_CONST, SymbolTableKinds.CLASS_CONST, offset);
+    offset += size;
+
+    while (this.tokenOneOf(',')) {
+      size = 1;
+      this.eat(',');
+      const { token: identifier } = this.eat(IDENTIFIER);
+      if (this.tk.symbol() == ':') {
+        this.eat(':');
+        const { token: d } = this.eat(INT_CONST);
+        size = d;
+      }
+      this.st.define(`${base}_${identifier}`, INT_CONST, SymbolTableKinds.CLASS_CONST, offset);
+      offset += size;
+    }
+    this.st.define(`${base}`, INT_CONST, SymbolTableKinds.CLASS_CONST, offset);
+    this.eat('}');
+  }
+
   compileSubroutineDec() {
     this.st.startSubroutine();
-    const { token: subroutineType } = this.eat([CONSTRUCTOR, FUNCTION, METHOD]);
+    let subroutineType;
+    let qualifier = "";
+    if (this.tokenOneOf([PRIVATE]) && this.enableExtensions) {
+      this.eat(PRIVATE);
+      qualifier = "__private_"
+      const { token: s } = this.eat([FUNCTION, METHOD]);
+      subroutineType = s;
+
+    } else {
+      const { token: s } = this.eat([CONSTRUCTOR, FUNCTION, METHOD]);
+      subroutineType = s;
+    }
 
     if (subroutineType === METHOD) {
       this.st.define('this', this.className, SymbolTableKinds.ARG);
@@ -403,7 +578,7 @@ class CompilationEngine {
         identifier
       }
     });
-    this.subroutineName = identifier;
+    this.subroutineName = qualifier + identifier;
 
     this.eat('(');
     this.logWrapper(this.compileParameterList, 'parameterList');
@@ -544,7 +719,7 @@ class CompilationEngine {
   }
 
   compileStatements() {
-    while (this.tokenOneOf(['!', '#!', IDENTIFIER, LET, IF, WHILE, DO, RETURN, CONTINUE, BREAK, FOR, GOTO, ANCHOR])) {
+    while (this.tokenOneOf(['!', '#!', IDENTIFIER, LET, IF, WHILE, DO, RETURN, CONTINUE, BREAK, FOR, GOTO, ANCHOR, EXPORT])) {
       this.logWrapper(this.compileStatement, 'statement');
     }
   }
@@ -645,6 +820,14 @@ class CompilationEngine {
         this.vw.writePushRef('int', segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
       }
   }
+
+  compileFunctionPointer() {
+    const { token: base } = this.eat(IDENTIFIER);
+    this.eat('.');
+    const { token: sub } = this.eat(IDENTIFIER);
+    this.vw.writePushLabel(`${base}.${sub}`);
+  }
+
 
   compileReferenceChar() {
     if (this.tokenOneOf('(')) {
@@ -1055,17 +1238,30 @@ class CompilationEngine {
         }
       });
 
-      this.eat('(');
-
-      if (this.st.exists(identifier)) { // calling a method on an object identifier
-        // push the object base address
-        this.vw.writePush(segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
-        const nArgs = this.logWrapper(this.compileExpressionList, 'expressionList') + 1;
-        const className = this.st.typeOf(identifier);
-        this.vw.writeCall(`${className}.${subroutineName}`, nArgs);
-      } else { // calling a function
+      if (this.tk.symbol() === '$') {// calling private function 
+        // check if we are in the class that defines the function
+        if (identifier !== this.className) {
+          console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
+          \tCannot call private function ${subroutineName} outside its class (${identifier}) (hint: '${this.tk.line}')`);
+          exit(1);
+        }
+        this.eat('$');
+        this.eat('(');
         const nArgs = this.logWrapper(this.compileExpressionList, 'expressionList');
-        this.vw.writeCall(`${identifier}.${subroutineName}`, nArgs);
+        this.vw.writeCall(`${identifier}.__private_${subroutineName}`, nArgs);
+      } else {
+        this.eat('(');
+  
+        if (this.st.exists(identifier)) { // calling a method on an object identifier
+          // push the object base address
+          this.vw.writePush(segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
+          const nArgs = this.logWrapper(this.compileExpressionList, 'expressionList') + 1;
+          const className = this.st.typeOf(identifier);
+          this.vw.writeCall(`${className}.${subroutineName}`, nArgs);
+        } else { // calling a function
+          const nArgs = this.logWrapper(this.compileExpressionList, 'expressionList');
+          this.vw.writeCall(`${identifier}.${subroutineName}`, nArgs);
+        }
       }
 
       this.eat(')');
@@ -1081,7 +1277,20 @@ class CompilationEngine {
       this.vw.writeCall(`${this.className}.${identifier}`, nArgs);
 
       this.eat(')');
+    }
+    else if (this.tk.symbol() === '$') { // calling private method from the class that declares it
+      this.eat('$');
+      this.log({ type: 'identifierToken', data: { ...logData, category: 'subroutineName' } });
+      this.eat('(');
+      if (this.st.exists('this')) { // inside another method
+        this.vw.writePush(Segments.ARG, 0);
+      } else { // inside constructor
+        this.vw.writePush(Segments.POINTER, 0);
+      }
+      const nArgs = this.logWrapper(this.compileExpressionList, 'expressionList') + 1;
+      this.vw.writeCall(`${this.className}.__private_${identifier}`, nArgs);
 
+      this.eat(')');
     } else {
       console.log(`[ERROR]:${this.inputFile}:${this.tk.lineno}:${this.tk.lineIndex} class ${this.className}:
       \tExpected '(' or '.' (hint: '${this.tk.line}')`);
@@ -1089,19 +1298,39 @@ class CompilationEngine {
     }
   }
 
+  compileCallIndirect() {
+
+    if (this.tokenOneOf('(')) {
+      this.eat('(');
+      this.logWrapper(this.compileExpression, 'expression');
+      this.eat(')');
+    } else {
+      const { token: identifier } = this.eat(IDENTIFIER);
+      this.vw.writePush(segment(this.st.kindOf(identifier)), this.st.indexOf(identifier));
+    }
+
+    this.eat('(');
+    const nArgs = this.logWrapper(this.compileExpressionList, 'expressionList');
+    this.vw.writeCallIndirect(nArgs);
+    this.eat(')');
+  }
+
   compileDoStatement() {
     this.eat(DO);
-    const { token: identifier } = this.eat(IDENTIFIER);
-
-    this.compileSubroutineCall(identifier);
-
+    if (this.tokenOneOf('$!')) {
+      this.eat('$!');
+      this.compileCallIndirect();
+    } else {
+      const { token: identifier } = this.eat(IDENTIFIER);
+      this.compileSubroutineCall(identifier);
+    }
     this.vw.writePop(Segments.TEMP, 0);
     this.eat(';');
   }
 
   compileReturnStatement() {
     this.eat(RETURN);
-    if (this.tokenOneOf([INT_CONST, STRING_CONST, ...KEYWORD_CONSTANT, IDENTIFIER, '(', '-', '~', '@', '#@', '!', '#!'])) {
+    if (this.tokenOneOf([INT_CONST, STRING_CONST, ...KEYWORD_CONSTANT, IDENTIFIER, '(', '-', '~', '@', '#@', '!', '#!', '$@', '$!'])) {
       this.logWrapper(this.compileExpression, 'expression');
     } else {
       this.vw.writePush(Segments.CONST, 0);
@@ -1187,7 +1416,7 @@ class CompilationEngine {
       const { token: identifier } = this.eat(IDENTIFIER);
       const logData = { kind: this.st.kindOf(identifier), defined: false, index: this.st.indexOf(identifier), identifier };
 
-      if (this.tokenOneOf(['.', '('])) {
+      if (this.tokenOneOf(['.', '(', '$'])) {
         this.compileSubroutineCall(identifier);
       } else if (this.tk.symbol() === '[') {
         this.log({ type: 'identifierToken', data: { ...logData, category: 'varName' } });
@@ -1238,7 +1467,7 @@ class CompilationEngine {
           this.vw.writeCall('String.appendChar', 2)
         });
       }
-    } else if (this.tokenOneOf(['-', '~', '@', '#@', '!', '#!'])) { // unaryOp term
+    } else if (this.tokenOneOf(['-', '~', '@', '#@', '!', '#!', '$@', '$!', '::'])) { // unaryOp term
       const { token } = this.eat(this.tk.symbol());
       if (token === '@') {
         this.compileReference();
@@ -1252,6 +1481,10 @@ class CompilationEngine {
         this.compileDereferenceChar();
         this.vw.writePop(Segments.POINTER, 2);
         this.vw.writePush(Segments.THATB, 0);
+      } else if (token === '$@') {
+        this.compileFunctionPointer();
+      } else if (token === '$!') {
+        this.compileCallIndirect();
       }
       else {
         this.logWrapper(this.compileTerm, 'term');
@@ -1260,6 +1493,8 @@ class CompilationEngine {
           this.vw.writeArithmetic(Commands.NEG);
         } else if (token === '~') {
           this.vw.writeArithmetic(Commands.NOT);
+        } else if (token === '::') { 
+          this.vw.writePushCommon()
         }
       }
     } else {

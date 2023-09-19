@@ -69,6 +69,18 @@ class VMWriter {
     this.write(`label ${label}`);
   }
 
+  writePushLabel(label) {
+    this.write(`#pushlabel ${label}`);
+  }
+
+  writePopCommon(temp) {
+    this.write(`#popcommon ${temp}`);
+  }
+
+  writePushCommon() {
+    this.write(`#pushcommon`);
+  }
+
   writeGoto(label) {
     this.write(`goto ${label}`);
   }
@@ -81,6 +93,11 @@ class VMWriter {
     assert(Number.isInteger(nArgs) && nArgs >= 0, 'nArgs must be an integer >= 0');
 
     this.write(`call ${name} ${nArgs}`);
+  }
+
+  writeCallIndirect(nArgs) {
+    assert(Number.isInteger(nArgs) && nArgs >= 0, 'nArgs must be an integer >= 0');
+    this.write(`#calltos ${nArgs}`);
   }
 
   writeFunction(name, nLocals) {

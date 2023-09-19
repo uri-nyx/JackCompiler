@@ -1,3 +1,4 @@
 node_modules
 **/*.vm
 **/*.xml
+.DS_Store
